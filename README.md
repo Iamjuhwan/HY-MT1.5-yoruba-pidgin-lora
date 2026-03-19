@@ -1,209 +1,137 @@
----
+from huggingface_hub import upload_file
+
+model_card = """---
+language:
+- yo
+- en
+- pcm
 base_model: tencent/HY-MT1.5-1.8B
-library_name: peft
-pipeline_tag: text-generation
 tags:
-- base_model:adapter:tencent/HY-MT1.5-1.8B
+- translation
 - lora
-- sft
-- transformers
-- trl
+- peft
+- yoruba
+- nigerian-pidgin
+- african-languages
+- qlora
+license: apache-2.0
 ---
 
-# Model Card for Model ID
+# HY-MT1.5-1.8B — Yoruba & Nigerian Pidgin LoRA
 
-<!-- Provide a quick summary of what the model is/does. -->
+Fine-tuned version of [tencent/HY-MT1.5-1.8B](https://huggingface.co/tencent/HY-MT1.5-1.8B)
+on Yoruba-English and Nigerian Pidgin-English translation pairs using QLoRA.
 
+## Evaluation Results (Baseline vs Fine-Tuned)
 
+Evaluated on 299 clean Yoruba/Pidgin/English examples,
+filtered from noisy OPUS-100 software strings:
 
-## Model Details
+| Metric | Base Model | Fine-Tuned | Delta |
+|--------|------------|------------|-------|
+| BLEU   | 6.21       | 6.90       | +0.70 |
+| chrF   | 13.57      | 13.59      | +0.03 |
 
-### Model Description
+BLEU scores are characteristically low for morphologically rich
+low-resource languages like Yoruba. The +0.70 BLEU improvement
+is meaningful given the small training set (~2,000 pairs).
+chrF improvement was marginal, indicating that larger, higher-quality
+agricultural domain data would produce stronger gains.
 
-<!-- Provide a longer summary of what this model is. -->
+## Motivation
 
+The base model was evaluated across 12 adversarial probe categories
+(see [Jesujuwon/HY-MT1.5-1.8B-blindspots](https://huggingface.co/datasets/Jesujuwon/HY-MT1.5-1.8B-blindspots)).
+Key failure modes identified:
 
+- Literal translation of idiomatic expressions
+- Hallucination on low-resource African language inputs
+- Poor handling of code-switched Pidgin/Yoruba/English text
+- Loss of sarcastic and ironic register
 
-- **Developed by:** [More Information Needed]
-- **Funded by [optional]:** [More Information Needed]
-- **Shared by [optional]:** [More Information Needed]
-- **Model type:** [More Information Needed]
-- **Language(s) (NLP):** [More Information Needed]
-- **License:** [More Information Needed]
-- **Finetuned from model [optional]:** [More Information Needed]
+## Training Data
 
-### Model Sources [optional]
-
-<!-- Provide the basic links for the model. -->
-
-- **Repository:** [More Information Needed]
-- **Paper [optional]:** [More Information Needed]
-- **Demo [optional]:** [More Information Needed]
-
-## Uses
-
-<!-- Address questions around how the model is intended to be used, including the foreseeable users of the model and those affected by the model. -->
-
-### Direct Use
-
-<!-- This section is for the model use without fine-tuning or plugging into a larger ecosystem/app. -->
-
-[More Information Needed]
-
-### Downstream Use [optional]
-
-<!-- This section is for the model use when fine-tuned for a task, or when plugged into a larger ecosystem/app -->
-
-[More Information Needed]
-
-### Out-of-Scope Use
-
-<!-- This section addresses misuse, malicious use, and uses that the model will not work well for. -->
-
-[More Information Needed]
-
-## Bias, Risks, and Limitations
-
-<!-- This section is meant to convey both technical and sociotechnical limitations. -->
-
-[More Information Needed]
-
-### Recommendations
-
-<!-- This section is meant to convey recommendations with respect to the bias, risk, and technical limitations. -->
-
-Users (both direct and downstream) should be made aware of the risks, biases and limitations of the model. More information needed for further recommendations.
-
-## How to Get Started with the Model
-
-Use the code below to get started with the model.
-
-[More Information Needed]
+| Source | Pairs | Languages |
+|--------|-------|-----------|
+| OPUS-100 (Helsinki-NLP) | ~4,000 | English and Yoruba |
+| Jesujuwon/HY-MT1.5-1.8B-blindspots | 12 | Multi (correction pairs) |
+| Custom synthetic pairs | 24 | Nigerian Pidgin and English, Yoruba and English |
 
 ## Training Details
 
-### Training Data
+| Parameter | Value |
+|-----------|-------|
+| Base model | tencent/HY-MT1.5-1.8B |
+| Method | QLoRA (4-bit NF4 + LoRA) |
+| LoRA rank | 16 |
+| LoRA alpha | 32 |
+| Target modules | q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj |
+| Epochs | 3 |
+| Effective batch size | 16 |
+| Learning rate | 2e-4 |
+| Scheduler | Cosine |
+| Optimizer | paged_adamw_8bit |
+| Hardware | Google Colab T4 16GB |
+| Training time | 75 minutes |
 
-<!-- This should link to a Dataset Card, perhaps with a short stub of information on what the training data is all about as well as documentation related to data pre-processing or additional filtering. -->
+## How to Use
 
-[More Information Needed]
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
+import torch
 
-### Training Procedure
+base_model_name = "tencent/HY-MT1.5-1.8B"
+adapter_name    = "Jesujuwon/HY-MT1.5-1.8B-yoruba-pidgin-lora"
 
-<!-- This relates heavily to the Technical Specifications. Content here should link to that section when it is relevant to the training procedure. -->
+tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+model     = AutoModelForCausalLM.from_pretrained(
+    base_model_name, torch_dtype=torch.bfloat16, device_map="auto"
+)
+model = PeftModel.from_pretrained(model, adapter_name)
+model.eval()
 
-#### Preprocessing [optional]
+def translate(text, target_language):
+    instruction = f"Translate the following segment into {target_language}, without additional explanation.\\n\\n{text}"
+    messages  = [{"role": "user", "content": instruction}]
+    tokenized = tokenizer.apply_chat_template(
+        messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
+    ).to(model.device)
+    input_len = tokenized.shape[1]
+    with torch.no_grad():
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            out = model.generate(
+                tokenized, max_new_tokens=256,
+                do_sample=False, repetition_penalty=1.05,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+    return tokenizer.decode(out[0][input_len:], skip_special_tokens=True).strip()
 
-[More Information Needed]
+print(translate("E don do. Nothing fit change am again.", "English"))
+print(translate("Education is the key to a better future.", "Yoruba"))
 
+## Limitations
 
-#### Training Hyperparameters
+- Training data is small (~4,000 pairs); larger Yoruba corpora would improve scores
+- Nigerian Pidgin pairs are synthetic and limited in dialectal variety
+- Model inherits base model constraints (no terminology glossary, 1.8B capacity)
+- Next phase: agricultural domain fine-tuning for farming advice use cases
 
-- **Training regime:** [More Information Needed] <!--fp32, fp16 mixed precision, bf16 mixed precision, bf16 non-mixed precision, fp16 non-mixed precision, fp8 mixed precision -->
+## Citation
 
-#### Speeds, Sizes, Times [optional]
+Hunyuan-MT-2025: HY-MT1.5 Tencent Hunyuan Machine Translation Model.
+Tencent Hunyuan Team, 2025.
+https://huggingface.co/tencent/HY-MT1.5-1.8B
+"""
 
-<!-- This section provides information about throughput, start/end time, checkpoint size if relevant, etc. -->
+with open("README.md", "w", encoding="utf-8") as f:
+    f.write(model_card)
 
-[More Information Needed]
-
-## Evaluation
-
-<!-- This section describes the evaluation protocols and provides the results. -->
-
-### Testing Data, Factors & Metrics
-
-#### Testing Data
-
-<!-- This should link to a Dataset Card if possible. -->
-
-[More Information Needed]
-
-#### Factors
-
-<!-- These are the things the evaluation is disaggregating by, e.g., subpopulations or domains. -->
-
-[More Information Needed]
-
-#### Metrics
-
-<!-- These are the evaluation metrics being used, ideally with a description of why. -->
-
-[More Information Needed]
-
-### Results
-
-[More Information Needed]
-
-#### Summary
-
-
-
-## Model Examination [optional]
-
-<!-- Relevant interpretability work for the model goes here -->
-
-[More Information Needed]
-
-## Environmental Impact
-
-<!-- Total emissions (in grams of CO2eq) and additional considerations, such as electricity usage, go here. Edit the suggested text below accordingly -->
-
-Carbon emissions can be estimated using the [Machine Learning Impact calculator](https://mlco2.github.io/impact#compute) presented in [Lacoste et al. (2019)](https://arxiv.org/abs/1910.09700).
-
-- **Hardware Type:** [More Information Needed]
-- **Hours used:** [More Information Needed]
-- **Cloud Provider:** [More Information Needed]
-- **Compute Region:** [More Information Needed]
-- **Carbon Emitted:** [More Information Needed]
-
-## Technical Specifications [optional]
-
-### Model Architecture and Objective
-
-[More Information Needed]
-
-### Compute Infrastructure
-
-[More Information Needed]
-
-#### Hardware
-
-[More Information Needed]
-
-#### Software
-
-[More Information Needed]
-
-## Citation [optional]
-
-<!-- If there is a paper or blog post introducing the model, the APA and Bibtex information for that should go in this section. -->
-
-**BibTeX:**
-
-[More Information Needed]
-
-**APA:**
-
-[More Information Needed]
-
-## Glossary [optional]
-
-<!-- If relevant, include terms and calculations in this section that can help readers understand the model or model card. -->
-
-[More Information Needed]
-
-## More Information [optional]
-
-[More Information Needed]
-
-## Model Card Authors [optional]
-
-[More Information Needed]
-
-## Model Card Contact
-
-[More Information Needed]
-### Framework versions
-
-- PEFT 0.18.1
+upload_file(
+    path_or_fileobj="README.md",
+    path_in_repo="README.md",
+    repo_id="Jesujuwon/HY-MT1.5-1.8B-yoruba-pidgin-lora",
+    repo_type="model",
+    token=hf_token,
+)
+print("✅ Model card updated!")
+print("View: https://huggingface.co/Jesujuwon/HY-MT1.5-1.8B-yoruba-pidgin-lora")
